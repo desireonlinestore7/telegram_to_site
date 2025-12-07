@@ -1,7 +1,8 @@
 import os
+import time
 import base64
 import requests
-from telethon import TelegramClient, events
+from telegram import Bot
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,59 +11,79 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH")
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")
-IMAGES_FOLDER = os.getenv("IMAGES_FOLDER", "images")
+IMAGES_FOLDER = "images"
+POSTS_FOLDER = "posts"
 
-api_id = 123456  # dummy, not used for bot
-api_hash = "abc123abc123abc123abc123abc123"
+bot = Bot(token=BOT_TOKEN)
 
-client = TelegramClient('bot_session', api_id, api_hash).start(bot_token=BOT_TOKEN)
-
-def upload_to_github(file_path, content, is_base64=False):
+def upload_to_github(file_path, content, is_binary=False):
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-    if not is_base64:
+
+    if is_binary:
+        content = base64.b64encode(content).decode()
+    else:
         content = base64.b64encode(content.encode()).decode()
+
     data = {
         "message": f"Add {file_path}",
         "content": content,
         "branch": GITHUB_BRANCH
     }
-    response = requests.put(url, json=data, headers=headers)
-    print(response.status_code, response.json())
 
-async def save_image(msg, post_id):
-    if msg.media:
-        file_name = f"{IMAGES_FOLDER}/post-{post_id}.jpg"
-        path = await msg.download_media(file=file_name)
-        with open(path, "rb") as f:
+    res = requests.put(url, json=data, headers=headers)
+    print("GitHub:", res.status_code, res.text)
+
+def handle_message(message):
+    post_id = message.message_id
+    text = message.text or ""
+
+    image_path = None
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        file = bot.get_file(file_id)
+        
+        local_name = f"{IMAGES_FOLDER}/post-{post_id}.jpg"
+        file.download(custom_path=local_name)
+
+        with open(local_name, "rb") as f:
             img_data = f.read()
-        upload_to_github(file_name, base64.b64encode(img_data).decode(), is_base64=True)
-        return file_name
-    return None
 
-@client.on(events.NewMessage(chats=CHANNEL_USERNAME))
-async def handler(event):
-    msg = event.message
-    post_id = msg.id
-    
-    # Upload image first (if exists)
-    image_path = await save_image(msg, post_id)
-    
-    # Prepare Markdown content
+        github_img_path = f"{IMAGES_FOLDER}/post-{post_id}.jpg"
+        upload_to_github(github_img_path, img_data, is_binary=True)
+        image_path = github_img_path
+
     markdown = f"""---
 title: "Telegram Post {post_id}"
-date: "{msg.date}"
+date: "{message.date}"
 ---
 
-{msg.message if msg.message else ""}
+# Telegram Post {post_id}
+
+{text}
 
 """
+
     if image_path:
         markdown += f"![Image]({image_path})\n"
 
-    filename = f"posts/post-{post_id}.md"
-    upload_to_github(filename, markdown)
+    github_md_path = f"{POSTS_FOLDER}/post-{post_id}.md"
+    upload_to_github(github_md_path, markdown)
 
-print("Bot started and listening...")
-client.run_until_disconnected()
+def start_bot():
+    print("Bot started… checking for new messages every 2 sec")
+    offset = None
+
+    while True:
+        updates = bot.get_updates(offset=offset, timeout=10)
+
+        for update in updates:
+            if update.channel_post:
+                handle_message(update.channel_post)
+
+            offset = update.update_id + 1
+
+        time.sleep(2)
+
+if __name__ == "__main__":
+    start_bot()
